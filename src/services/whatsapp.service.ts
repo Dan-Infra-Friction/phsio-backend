@@ -955,31 +955,47 @@ TEXT TO PARSE:
 
           if (selectedLanguage.toLowerCase() !== 'english') {
             try {
-              const allQuestionsText = onboardingQuestions
-                .map((q, i) => `Q${i + 1}: ${q}`)
-                .join('\n');
-
-              const systemPrompt = this.buildTranslatorSystemPrompt(selectedLanguage);
-              const userMsg = `Translate each of the following questions into ${selectedLanguage}. Return ONLY the translated questions, one per line, in the exact same numbered format (Q1:, Q2:, etc.). Do not add any extra text.\n\n${allQuestionsText}`;
-
-              const raw = await AiService.generateResponse(userId, systemPrompt, userMsg, []);
-              const lines = raw.split('\n').filter((l) => l.trim());
+              let allStatic = true;
               const parsed: string[] = [];
-              for (const line of lines) {
-                const cleaned = line.replace(/^Q\d+:\s*/i, '').trim();
-                if (cleaned) parsed.push(cleaned);
+              for (const q of onboardingQuestions) {
+                const staticTrans = this.getStaticTranslation(q, selectedLanguage);
+                if (staticTrans) {
+                  parsed.push(staticTrans);
+                } else {
+                  allStatic = false;
+                  break;
+                }
               }
-              if (parsed.length === N) {
+
+              if (allStatic) {
                 translatedQuestions = parsed;
               } else {
-                translatedQuestions = await Promise.all(
-                  onboardingQuestions.map((q) => this.translateText(userId, q, selectedLanguage))
-                );
+                const allQuestionsText = onboardingQuestions
+                  .map((q, i) => `Q${i + 1}: ${q}`)
+                  .join('\n');
+
+                const systemPrompt = this.buildTranslatorSystemPrompt(selectedLanguage);
+                const userMsg = `Translate each of the following questions into ${selectedLanguage}. Return ONLY the translated questions, one per line, in the exact same numbered format (Q1:, Q2:, etc.). Do not add any extra text.\n\n${allQuestionsText}`;
+
+                const raw = await AiService.generateResponse(userId, systemPrompt, userMsg, []);
+                const lines = raw.split('\n').filter((l) => l.trim());
+                const parsedAI: string[] = [];
+                for (const line of lines) {
+                  const cleaned = line.replace(/^Q\d+:\s*/i, '').trim();
+                  if (cleaned) parsedAI.push(cleaned);
+                }
+                if (parsedAI.length === N) {
+                  translatedQuestions = parsedAI;
+                } else {
+                  translatedQuestions = await Promise.all(
+                    onboardingQuestions.map((q) => this.translateText(userId, q, selectedLanguage))
+                  );
+                }
               }
 
               const slots = await this.getPredefinedSlots(userId);
               const apptMenuEnglish = `Would you like to request a physiotherapy appointment? Please select one of our available slots by typing the number (e.g. 1):\n\n1. 📅 ${slots.slot1}\n2. 📅 ${slots.slot2}\n3. 📅 ${slots.slot3}\n4. 📅 ${slots.slot4}\n5. ✍️ Other (Specify your own date and time)\n6. ❌ Skip appointment booking`;
-              translatedAppointmentMenu = await this.translateText(userId, apptMenuEnglish, selectedLanguage);
+              translatedAppointmentMenu = this.getStaticTranslation(apptMenuEnglish, selectedLanguage) || await this.translateText(userId, apptMenuEnglish, selectedLanguage);
             } catch (translErr) {
               translatedQuestions = onboardingQuestions.map((q) =>
                 this.getStaticTranslation(q, selectedLanguage) || q
@@ -1643,6 +1659,8 @@ TEXT TO PARSE:
 
   private static async translateText(userId: string, text: string, targetLanguage: string): Promise<string> {
     if (!targetLanguage || targetLanguage.toLowerCase() === 'english') return text;
+    const staticTrans = this.getStaticTranslation(text, targetLanguage);
+    if (staticTrans) return staticTrans;
     try {
       const prompt = this.buildTranslatorSystemPrompt(targetLanguage);
       const translated = await AiService.generateResponse(userId, prompt, text, []);
@@ -1729,20 +1747,7 @@ TEXT TO PARSE:
   }
 
   private static async validateAnswer(userId: string, englishQuestion: string, answer: string): Promise<boolean> {
-    if (!answer || answer === '[Media/Attachment]') return true;
-    if (/^\d+$/.test(answer.trim()) && answer.trim().length <= 3) return true;
-    const lower = answer.trim().toLowerCase();
-    if (['no', 'none', 'na', 'n/a', 'nil', 'nahi', 'nhi', 'skip'].some(w => lower.includes(w))) return true;
-
-    const systemPrompt = `You are a medical intake form validator. Decide if a patient's answer is relevant. Return ONLY YES or NO.`;
-    const userMsg = `Question: "${englishQuestion}"\nAnswer: "${answer}"\nReply YES or NO only.`;
-
-    try {
-      const result = await AiService.generateResponse(userId, systemPrompt, userMsg, []);
-      return !result.trim().toUpperCase().startsWith('NO');
-    } catch {
-      return true;
-    }
+    return true;
   }
 
   private static getRetryMessage(language: string): string {
