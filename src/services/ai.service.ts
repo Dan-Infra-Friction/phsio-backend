@@ -157,28 +157,47 @@ export class AiService {
       }
 
       case 'openrouter': {
-        const apiKey = process.env.OPENROUTER_API_KEY;
-        if (!apiKey) throw new Error('OpenRouter API key is not configured.');
+        const apiKeys = [
+          process.env.OPENROUTER_API_KEY,
+          process.env.OPENROUTER_API_KEY_2,
+          process.env.OPENROUTER_API_KEY_3,
+          process.env.OPENROUTER_API_KEY_4,
+        ].filter(Boolean) as string[];
 
-        const openai = new OpenAI({
-          baseURL: "https://openrouter.ai/api/v1",
-          apiKey: apiKey,
-          defaultHeaders: {
-            "HTTP-Referer": "http://localhost:3000",
-            "X-Title": "PhysioBot",
+        if (apiKeys.length === 0) throw new Error('OpenRouter API key is not configured.');
+
+        let openRouterError: any = null;
+
+        for (let i = 0; i < apiKeys.length; i++) {
+          const key = apiKeys[i];
+          try {
+            console.log(`[OpenRouter] Trying API key index ${i + 1}/${apiKeys.length}`);
+            const openai = new OpenAI({
+              baseURL: "https://openrouter.ai/api/v1",
+              apiKey: key,
+              defaultHeaders: {
+                "HTTP-Referer": "http://localhost:3000",
+                "X-Title": "PhysioBot",
+              }
+            });
+
+            const completion = await openai.chat.completions.create({
+              model: modelName,
+              messages: chatHistory as any,
+              temperature: 0.7,
+              max_tokens: 800,
+            });
+
+            const text = completion.choices[0]?.message?.content;
+            if (!text) throw new Error('Empty response from OpenRouter.');
+            return text.trim();
+          } catch (err: any) {
+            console.warn(`[OpenRouter Key Rotation] Key index ${i + 1} failed:`, err.message || err);
+            openRouterError = err;
           }
-        });
+        }
 
-        const completion = await openai.chat.completions.create({
-          model: modelName,
-          messages: chatHistory as any,
-          temperature: 0.7,
-          max_tokens: 800,
-        });
-
-        const text = completion.choices[0]?.message?.content;
-        if (!text) throw new Error('Empty response from OpenRouter.');
-        return text.trim();
+        throw new Error(`All OpenRouter API keys failed. Last error: ${openRouterError?.message || 'Unknown'}`);
       }
 
       default:
