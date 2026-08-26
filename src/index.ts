@@ -81,7 +81,7 @@ app.use('/uploads', express.static(path.join(process.cwd(), 'storage', 'uploads'
 // 3. Rate Limiting
 const apiLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  limit: 200, // Limit each IP to 200 requests per windowMs
+  limit: 5000, // Limit each IP to 5000 requests per windowMs
   standardHeaders: 'draft-7',
   legacyHeaders: false,
   message: {
