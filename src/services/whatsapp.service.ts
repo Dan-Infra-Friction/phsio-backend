@@ -1032,8 +1032,16 @@ TEXT TO PARSE:
         // --- STEP 101: Process Consultation verification (Receipt vs Hello) ---
         if (patient.onboardingStep === 101) {
           const cleanText = incomingText.trim().toLowerCase();
+          const isFirstTime = 
+            cleanText === 'hello' || 
+            cleanText.includes('hello') || 
+            cleanText.includes('hi') || 
+            cleanText.includes('hey') || 
+            cleanText.includes('first') || 
+            cleanText.includes('new') ||
+            cleanText.includes('no');
           
-          if (cleanText === 'hello') {
+          if (isFirstTime) {
             // User selected "first time" -> Start the intake questionnaire flow
             let cachedTranslatedQuestions: string[] = onboardingQuestions;
             try {
