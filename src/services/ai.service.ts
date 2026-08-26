@@ -44,7 +44,7 @@ export class AiService {
           history
         );
         if (response) {
-          return response;
+          return this.cleanThinkingProcess(response);
         }
       } catch (err: any) {
         console.error(`[AI Error] ${option.provider} / ${option.model} failed:`, err.message || err);
@@ -203,5 +203,14 @@ export class AiService {
       default:
         throw new Error(`Unsupported AI provider: ${provider}`);
     }
+  }
+
+  public static cleanThinkingProcess(text: string): string {
+    if (!text) return '';
+    // Strip out <think>...</think> tags and anything inside them
+    let cleaned = text.replace(/<think>[\s\S]*?<\/think>/gi, '');
+    // Strip out other common thinking block patterns if any
+    cleaned = cleaned.replace(/\[thinking\][\s\S]*?\[\/thinking\]/gi, '');
+    return cleaned.trim();
   }
 }
