@@ -206,6 +206,9 @@ export class WhatsappService {
         }
 
         try {
+          // Immediately show typing indicator on WhatsApp upon receiving a message
+          await sock.sendPresenceUpdate('composing', remoteJid).catch(() => {});
+          
           await this.handleIncomingMessage(userId, sock, msg);
         } catch (err) {
           console.error('[WhatsApp Baileys] Error handling message:', err);
@@ -542,12 +545,36 @@ TEXT TO PARSE:
               const confirmationTemplate = `Hello ${patient.name}! Your appointment request has been approved and successfully booked for:\n📅 *${formattedSlot}*\n\nWe look forward to seeing you!`;
               const translatedConfirmation = await this.translateText(userId, confirmationTemplate, patientLanguage);
 
+              // Get settings to determine onboarding step length
+              const clinicSettings = await prisma.setting.findUnique({ where: { userId } });
+              let totalQuestions = 10;
+              if (clinicSettings?.onboardingQuestions) {
+                try {
+                  const parsed = JSON.parse(clinicSettings.onboardingQuestions);
+                  if (Array.isArray(parsed) && parsed.length > 0) {
+                    totalQuestions = parsed.length;
+                  }
+                } catch {}
+              }
+
+              // Update patient onboarding step to complete (N + 3)
+              await prisma.patient.update({
+                where: { id: patient.id },
+                data: { onboardingStep: totalQuestions + 3 },
+              });
+
               await this.sendMessage(userId, patient.phone, translatedConfirmation);
 
               let conversation = await prisma.conversation.findUnique({
                 where: { userId_patientId: { userId, patientId: patient.id } },
               });
               if (conversation) {
+                // Ensure AI replies are enabled for this conversation after approval
+                await prisma.conversation.update({
+                  where: { id: conversation.id },
+                  data: { isAiEnabled: true },
+                });
+
                 await prisma.message.create({
                   data: {
                     conversationId: conversation.id,
