@@ -1121,7 +1121,7 @@ TEXT TO PARSE:
               await prisma.patient.update({
                 where: { id: patient.id },
                 data: {
-                  onboardingStep: N + 2, // Skip onboarding, set to complete state
+                  onboardingStep: N + 3, // Skip onboarding entirely, set to complete state
                   lastMessage: fullResponse,
                 },
               });
@@ -1490,7 +1490,9 @@ TEXT TO PARSE:
     }
 
     // 5. AI Auto-Reply Pipeline
-    const isAiActive = conversation.isAiEnabled && settings?.autoReplyEnabled;
+    // Ensure we do NOT trigger AI outgoing messages while onboarding is in progress
+    const isOnboardingActive = N > 0 && (patient.onboardingStep <= N + 2 || patient.onboardingStep === 101);
+    const isAiActive = !isOnboardingActive && conversation.isAiEnabled && settings?.autoReplyEnabled;
 
     if (isAiActive) {
       SocketService.sendToUser(userId, 'typing', { patientId: patient.id, isTyping: true });
