@@ -1,0 +1,7 @@
+2026/08/24-23:30:20.386 2f00 Reusing MANIFEST C:\Users\littl\Documents\New folderpb\backend\storage\sessions\session-760d55e9-7d79-4aa8-ab1a-3f60f2dbc47b\Default\IndexedDB\https_web.whatsapp.com_0.indexeddb.leveldb/MANIFEST-000001
+2026/08/24-23:30:21.001 2f00 Recovering log #244
+2026/08/24-23:30:21.692 2f00 Reusing old log C:\Users\littl\Documents\New folderpb\backend\storage\sessions\session-760d55e9-7d79-4aa8-ab1a-3f60f2dbc47b\Default\IndexedDB\https_web.whatsapp.com_0.indexeddb.leveldb/000244.log 
+2026/08/24-23:30:32.797 2f00 Level-0 table #249: started
+2026/08/24-23:30:43.153 2f00 Level-0 table #249: 24220 bytes OK
+2026/08/24-23:30:44.489 2f00 Delete type=0 #244
+2026/08/24-23:30:44.755 2f00 Manual compaction at level-0 from '\x00Z\x00\x00\x00' @ 72057594037927935 : 1 .. '\x00[\x00\x00\x00' @ 0 : 0; will stop at (end)

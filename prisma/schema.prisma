@@ -1,0 +1,252 @@
+datasource db {
+  provider = "mongodb"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model User {
+  id               String            @id @default(uuid()) @map("_id")
+  email            String            @unique
+  password         String
+  name             String
+  role             String            @default("USER") // ADMIN, USER
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
+  whatsappSession  WhatsappSession?
+  patients         Patient[]
+  appointments     Appointment[]
+  knowledgeBases   KnowledgeBase[]
+  settings         Setting?
+  notifications    Notification[]
+  analytics        Analytics[]
+  treatmentPlans   TreatmentPlan[]
+  exercises        Exercise[]
+  doctors          Doctor[]
+  regions          Region[]
+}
+
+model WhatsappSession {
+  id           String    @id @default(uuid()) @map("_id")
+  userId       String    @unique
+  user         User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  status       String    @default("DISCONNECTED") // CONNECTED, DISCONNECTED, CONNECTING
+  phone        String?
+  profileName  String?
+  profilePicUrl String?
+  lastSync     DateTime?
+  qrCode       String?   // Base64 QR code string for display
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+}
+
+model Patient {
+  id             String        @id @default(uuid()) @map("_id")
+  userId         String
+  user           User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name           String
+  phone          String        // e.g., "919876543210@c.us"
+  realPhone      String?       // formatted real phone number
+  email          String?
+  profilePhoto   String?
+  tags           String        @default("[]") // JSON string of tags e.g. ["back-pain", "knee-injury"]
+  notes          String?
+  status         String        @default("ACTIVE") // ACTIVE, INACTIVE
+  condition      String?
+  doctor         String?
+  painLevel      Int           @default(5)
+  riskLevel      String        @default("Stable") // Stable, Moderate, High Risk
+  compliancePct  Int           @default(100)
+  nextAppt       String?
+  onboardingStep    Int           @default(0) // 0: not started, 1-10: current question being answered, 11: completed
+  onboardingAnswers String        @default("{}") // JSON string of answers
+  onboardingSummary String?
+  lastSeen       DateTime?
+  lastMessage    String?
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+  receiptNumber  String?       @unique
+  conversations  Conversation[]
+  appointments   Appointment[]
+  treatmentPlans TreatmentPlan[]
+
+  @@unique([userId, phone])
+}
+
+model Conversation {
+  id            String    @id @default(uuid()) @map("_id")
+  userId        String
+  patientId     String
+  patient       Patient   @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  isAiEnabled   Boolean   @default(true) // Toggle for AI replies vs human takeover
+  lastMessageAt DateTime  @default(now())
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  messages      Message[]
+
+  @@unique([userId, patientId])
+}
+
+model Message {
+  id             String       @id @default(uuid()) @map("_id")
+  conversationId String
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  sender         String       // PATIENT, AI, HUMAN
+  body           String
+  type           String       @default("text") // text, image, pdf, audio, video, document
+  mediaUrl       String?      // Local file path or URL if media
+  status         String       @default("SENT") // SENT, DELIVERED, READ
+  timestamp      DateTime     @default(now())
+  createdAt      DateTime     @default(now())
+}
+
+model Appointment {
+  id         String    @id @default(uuid()) @map("_id")
+  userId     String
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  patientId  String
+  patient    Patient   @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  title      String
+  dateTime   DateTime
+  status     String    @default("UPCOMING") // UPCOMING, COMPLETED, CANCELLED, MISSED
+  notes      String?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+}
+
+model KnowledgeBase {
+  id        String   @id @default(uuid()) @map("_id")
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  fileName  String
+  fileType  String   // pdf, docx, txt
+  filePath  String
+  content   String   // Extracted text content for RAG
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Setting {
+  id                  String   @id @default(uuid()) @map("_id")
+  userId              String   @unique
+  user                User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  clinicName          String   @default("My Physiotherapy Clinic")
+  clinicLogo          String?
+  clinicAddress       String?
+  phone               String?
+  website             String?
+  workingHours        String   @default("{\"mon\":[\"09:00\",\"17:00\"],\"tue\":[\"09:00\",\"17:00\"],\"wed\":[\"09:00\",\"17:00\"],\"thu\":[\"09:00\",\"17:00\"],\"fri\":[\"09:00\",\"17:00\"],\"sat\":[\"09:00\",\"13:00\"],\"sun\":[]}")
+  availableSlotsText  String   @default("We are open Mon-Fri from 4:00 AM to 4:00 PM. Please let us know your preferred date and time!")
+  onboardingSlots     String   @default("[\"Monday at 10:00 AM\",\"Tuesday at 2:00 PM\",\"Wednesday at 11:00 AM\",\"Thursday at 4:00 PM\"]")
+  aiPersonality       String   @default("You are PhysioBot, a professional, empathetic physiotherapy assistant. Answer questions about rehab, stretches, posture, and clinic information. Be helpful and clear.")
+  welcomeMessage      String   @default("Welcome to our clinic! I am PhysioBot, your physiotherapy assistant. How can I help you today?")
+  onboardingQuestions String   @default("[\"What is your full name?\",\"What is your date of birth?\",\"What main symptoms or pain are you experiencing?\",\"On a scale of 1-10, how severe is your pain?\",\"How long have you had this issue?\",\"What makes the pain better or worse?\",\"Have you had any previous treatments or surgeries for this?\",\"Are you currently taking any medications?\",\"What are your primary goals for physical therapy?\",\"What are your preferred days and times for appointments?\"]")
+  autoReplyEnabled    Boolean  @default(true)
+  languages           String   @default("[\"English\", \"Hindi\"]")
+  notificationSettings String  @default("{\"newPatient\":true,\"newChat\":true,\"appointment\":true,\"failedAi\":true,\"whatsappDisconnect\":true}")
+  aiProvider          String   @default("gemini") // gemini, openai, openrouter, ollama
+  aiModel             String   @default("gemini-1.5-flash")
+  apiKeys             String   @default("{}") // Encrypted or plain JSON holding keys for different providers
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+}
+
+model Notification {
+  id        String   @id @default(uuid()) @map("_id")
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type      String   // NEW_PATIENT, NEW_CHAT, APPOINTMENT, FAILED_AI, WHATSAPP_DISCONNECT
+  title     String
+  message   String
+  read      Boolean  @default(false)
+  createdAt DateTime @default(now())
+}
+
+model Analytics {
+  id                String   @id @default(uuid()) @map("_id")
+  userId            String
+  user              User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  date              DateTime @default(now())
+  patientsCount     Int      @default(0)
+  messagesCount     Int      @default(0)
+  todayChatsCount   Int      @default(0)
+  aiRepliesCount    Int      @default(0)
+  appointmentsCount Int      @default(0)
+  kbDocsCount       Int      @default(0)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+}
+
+model TreatmentPlan {
+  id             String   @id @default(uuid()) @map("_id")
+  userId         String
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  patientId      String
+  patient        Patient  @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  condition      String
+  doctor         String   @default("Dr. Sarah Jenkins")
+  startDate      String   @default("")
+  endDate        String   @default("")
+  durationWeeks  Int      @default(8)
+  currentPhase   Int      @default(1)
+  totalPhases    Int      @default(4)
+  compliancePct  Int      @default(100)
+  status         String   @default("Active") // Active, Completed, Pending Review
+  notes          String?
+  exercises      String   @default("[]")     // JSON: [{name, sets, reps, days, instructions}]
+  reminderDays   String   @default("[]")     // JSON: ["monday","wednesday","friday"] or ["daily"]
+  reminderTime   String   @default("09:00")  // HH:MM 24h format
+  progressLog    String   @default("[]")     // JSON: [{date, reply, aiAdvice}]
+  lastRemindedAt DateTime?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+}
+
+model Exercise {
+  id           String   @id @default(uuid()) @map("_id")
+  userId       String
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  title        String
+  category     String   @default("General Rehab")
+  region       String   @default("Spine")
+  difficulty   String   @default("Beginner") // Beginner, Intermediate, Advanced
+  setsReps     String   @default("3 Sets × 10 Reps")
+  duration     String   @default("5 Mins")
+  targetMuscle String   @default("Target Muscle Group")
+  description  String?
+  instructions String   @default("[]") // JSON string array of steps
+  imageUrl     String?
+  videoUrl     String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+}
+
+model Doctor {
+  id              String   @id @default(uuid()) @map("_id")
+  userId          String
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name            String
+  role            String   @default("Physiotherapist")
+  specialty       String
+  email           String
+  phone           String
+  activePatients  Int      @default(0)
+  rating          Float    @default(5.0)
+  experienceYears Int      @default(1)
+  availability    String   @default("Available Today") // Available Today, In Surgery / Rehab, On Leave
+  avatarInitials  String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+}
+model Region {
+  id        String   @id @default(uuid()) @map("_id")
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name      String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([userId, name])
+}

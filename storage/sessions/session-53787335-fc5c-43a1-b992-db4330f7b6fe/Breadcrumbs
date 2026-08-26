@@ -1,0 +1,62 @@
+0:00:05 Tab1 StartNav4 #typed
+0:00:14 Memory Pressure: Moderate
+0:00:19 Tab1 FinishNav4
+0:00:24 Memory Pressure: Critical
+0:00:29 Memory Pressure: Critical
+0:00:35 Memory Pressure: Critical
+0:00:38 Tab1 PageLoad
+0:00:40 Memory Pressure: Moderate
+0:00:45 Memory Pressure: Critical
+0:00:50 Memory Pressure: Moderate
+0:00:51 Browser1 Close Tab1 at 0
+0:00:52 Widget Closed: BrowserWidget
+0:00:00 Startup
+0:00:00 UserEducation.Session.ActivePeriodStart
+0:00:07 Tab1 StartNav3 #auto_toplevel
+0:00:07 Browser1 Insert active Tab1 at 0
+0:00:08 TouchMode.EnteredNonTouchMode
+0:00:08 Tab1 FinishNav3
+0:00:10 Tab1 PageLoad
+0:00:10 Memory Pressure: Moderate
+0:00:12 Widget Closed: ToastView
+0:00:15 Memory Pressure: Critical
+0:00:20 Memory Pressure: Critical
+0:00:25 Memory Pressure: Critical
+0:00:30 Memory Pressure: Critical
+0:00:32 Tab1 StartNav4 #typed
+0:00:35 Memory Pressure: Critical
+0:00:40 Memory Pressure: Critical
+0:00:45 Memory Pressure: Critical
+0:00:50 Memory Pressure: Critical
+0:00:55 Memory Pressure: Critical
+0:01:00 Memory Pressure: Critical
+0:01:02 Tab1 FinishNav4
+0:01:05 Memory Pressure: Critical
+0:01:07 Tab1 RenderProcessGone
+0:01:07 Browser1 Close Tab1 at 0
+0:01:07 Widget Closed: BrowserWidget
+0:01:07 Widget Closed: BubbleDialogModelHostContentsView
+0:01:07 Widget Closed: RoundedOmniboxResultsFrameWindow
+0:01:07 Widget Closed: RoundedOmniboxResultsFrameWindow
+0:01:22 Shutdown
+0:00:00 Startup
+0:00:01 UserEducation.Session.ActivePeriodStart
+0:00:04 Tab1 StartNav3 #auto_toplevel
+0:00:04 Browser1 Insert active Tab1 at 0
+0:00:05 TouchMode.EnteredNonTouchMode
+0:00:05 Tab1 FinishNav3
+0:00:05 Tab1 PageLoad
+0:00:05 Memory Pressure: Moderate
+0:00:06 Tab1 StartNav4 #typed
+0:00:10 Memory Pressure: Critical
+0:00:15 Memory Pressure: Critical
+0:00:20 Memory Pressure: Critical
+0:00:25 Memory Pressure: Critical
+0:00:30 Memory Pressure: Critical
+0:00:31 Tab1 FinishNav4
+0:00:35 Memory Pressure: Critical
+0:00:36 Tab1 PageLoad
+0:00:40 Memory Pressure: Critical
+0:00:45 Memory Pressure: Critical
+0:00:50 Memory Pressure: Moderate
+0:00:55 Browser1 Close Tab1 at 0
