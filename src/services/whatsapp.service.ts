@@ -343,8 +343,24 @@ export class WhatsappService {
     } else if (!targetPhone.includes('@')) {
       jid = `${targetPhone.replace(/[^\d]/g, '')}@s.whatsapp.net`;
     }
+
+    try {
+      // Send typing status to the patient on WhatsApp
+      await sock.sendPresenceUpdate('composing', jid);
+      // Wait a short delay to simulate natural typing speed
+      const delayMs = Math.min(3000, Math.max(1000, text.length * 12));
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    } catch (presenceErr) {
+      console.error('[WhatsApp Baileys] Failed to send typing presence update:', presenceErr);
+    }
+
     console.log(`[WhatsApp Baileys Outgoing] Sending message to ${jid}: "${text.substring(0, 60)}..."`);
     await sock.sendMessage(jid, { text });
+
+    try {
+      // Pause typing status after sending
+      await sock.sendPresenceUpdate('paused', jid);
+    } catch {}
   }
 
   /**
