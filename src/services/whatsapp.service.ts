@@ -1579,6 +1579,8 @@ TEXT TO PARSE:
           `Working Hours: ${settings.workingHours}\n\n` +
           `RAG KNOWLEDGE RETRIEVED:\n${contextString}\n` +
           `RULES FOR REPLIES:\n` +
+          `- **CRITICAL LENGTH RULE**: Keep your response extremely short (maximum 3 to 4 lines).\n` +
+          `- **DIRECT ANSWER RULE**: Reply directly to the patient's question. Do NOT explain what you are doing (do NOT say things like "I am searching", "I am translating", or "As requested").\n` +
           `- Answer physiotherapy and rehab questions.\n` +
           `- Suggest stretches or posture corrections, but state they are educational.\n` +
           `- Reply in Hindi or English depending on the patient's language.\n` +
@@ -1697,7 +1699,7 @@ TEXT TO PARSE:
     } else if (targetLanguage.toLowerCase() === 'marathi') {
       languageInstruction = 'Write in proper Marathi using Devanagari script only.';
     }
-    return `You are a medical translator for a physiotherapy clinic. Translate into ${targetLanguage}.\n${languageInstruction}\nReturn ONLY translated text.`;
+    return `You are a medical translator for a physiotherapy clinic. Translate the input text directly into ${targetLanguage}.\n${languageInstruction}\nCRITICAL: Return ONLY the raw translation itself. Do NOT include any introductory or concluding text, explanations, or notes (do not say "Here is the translation" or similar).`;
   }
 
   private static async translateText(userId: string, text: string, targetLanguage: string): Promise<string> {
