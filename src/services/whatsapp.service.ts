@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import makeWASocket, {
   useMultiFileAuthState,
   DisconnectReason,
@@ -20,9 +21,77 @@ import { AiService } from './ai.service';
 import { RagService } from './rag.service';
 import { AppointmentService } from './appointment.service';
 
+import pdfParse from 'pdf-parse';
+
+export const PAIN_CATEGORIES = [
+  { id: 'leg', name: '🦵 Leg / Knee / Ankle Pain', keywords: ['leg', 'knee', 'ankle', 'foot', 'thigh', '1'] },
+  { id: 'back', name: '🦴 Back / Spine Pain', keywords: ['back', 'spine', 'lumbar', 'lower back', '2'] },
+  { id: 'neck', name: '💆 Neck & Shoulder Pain', keywords: ['neck', 'shoulder', 'traps', '3'] },
+  { id: 'arm', name: '💪 Arm / Elbow / Hand Pain', keywords: ['arm', 'elbow', 'wrist', 'hand', '4'] },
+  { id: 'hip', name: '🏃 Hip / Pelvic Pain', keywords: ['hip', 'pelvis', 'groin', '5'] },
+  { id: 'other', name: '⚡ Other / General Pain', keywords: ['other', 'general', 'chest', 'full body', '6'] },
+];
+
 export class WhatsappService {
   private static clients: Map<string, WASocket> = new Map();
   private static pairingRequests: Map<string, string> = new Map();
+
+  /**
+   * Extracts ALL text questions from a PDF file for 1-by-1 WhatsApp assessment.
+   */
+  public static async extractPdfQuestions(filePath: string): Promise<string[]> {
+    try {
+      let absolutePath = filePath;
+      if (filePath.startsWith('/uploads/')) {
+        absolutePath = path.join(process.cwd(), 'storage', filePath.replace(/^\/uploads\//, 'uploads/'));
+      } else if (!path.isAbsolute(filePath)) {
+        absolutePath = path.join(process.cwd(), 'storage', 'uploads', filePath);
+      }
+
+      if (!fs.existsSync(absolutePath)) {
+        console.warn(`[PDF Extractor] PDF file not found at: ${absolutePath}`);
+        return [];
+      }
+
+      const dataBuffer = fs.readFileSync(absolutePath);
+      const pdfData = await pdfParse(dataBuffer);
+      const rawText = pdfData.text || '';
+
+      const lines = rawText
+        .split(/\r?\n/)
+        .map((l) => l.trim())
+        .filter((l) => l.length > 3);
+
+      const questions: string[] = [];
+      const ignorePatterns = /^(page\s*\d+|physiotherapy|assessment\s*form|clinical|patient\s*name|date:?|signature:?)/i;
+
+      for (const line of lines) {
+        if (ignorePatterns.test(line)) continue;
+
+        // Clean leading numbers/bullets e.g., "1.", "Q1:", "1)", "-"
+        const cleaned = line.replace(/^(?:\d+[\.\)]|Q\d+:?|\*|\-)\s*/i, '').trim();
+
+        if (cleaned.length > 5 && !ignorePatterns.test(cleaned)) {
+          if (
+            cleaned.endsWith('?') ||
+            /^(what|how|where|when|on|describe|do|does|have|has|is|are|please|rate|specify|list|detail|history|level)/i.test(cleaned)
+          ) {
+            questions.push(cleaned);
+          } else if (cleaned.length < 150) {
+            questions.push(cleaned);
+          }
+        }
+      }
+
+      // Return ALL unique questions in sequential order
+      const unique = Array.from(new Set(questions));
+      console.log(`[PDF Extractor] Successfully extracted ALL ${unique.length} questions from ${path.basename(filePath)}`);
+      return unique;
+    } catch (err: any) {
+      console.error('[PDF Extractor] Error extracting questions from PDF:', err.message || err);
+      return [];
+    }
+  }
 
   /**
    * Restores all WhatsApp sessions that were previously active.
@@ -216,6 +285,30 @@ export class WhatsappService {
       }
     });
 
+    // Poll updates listener
+    sock.ev.on('messages.update', async (updates) => {
+      for (const update of updates) {
+        if ((update as any).pollUpdates) {
+          const key = update.key;
+          const remoteJid = key?.remoteJid || '';
+          if (!remoteJid || isJidGroup(remoteJid) || isJidBroadcast(remoteJid)) continue;
+
+          const pollUpdates = (update as any).pollUpdates;
+          for (const pollUpd of pollUpdates) {
+            const fakeMsg = {
+              key,
+              message: {
+                pollUpdateMessage: pollUpd,
+              },
+            };
+            await this.handleIncomingMessage(userId, sock, fakeMsg as any).catch((err) => {
+              console.error('[WhatsApp Service] Error processing poll update message:', err);
+            });
+          }
+        }
+      }
+    });
+
     return sock;
   }
 
@@ -383,6 +476,147 @@ export class WhatsappService {
       await sock.sendMessage(jid, { video: { url: mediaUrl }, caption });
     } else {
       await sock.sendMessage(jid, { image: { url: mediaUrl }, caption });
+    }
+  }
+
+  /**
+   * Sends a pain category poll message to the patient (or text menu fallback).
+   */
+  public static async sendPainCategoryPoll(userId: string, targetPhone: string, language: string = 'English', conversationId?: string) {
+    const sock = this.clients.get(userId);
+    if (!sock) throw new Error('WhatsApp client is not active.');
+
+    let jid = targetPhone;
+    if (targetPhone.endsWith('@c.us')) {
+      jid = targetPhone.replace('@c.us', '@s.whatsapp.net');
+    } else if (!targetPhone.includes('@')) {
+      jid = `${targetPhone.replace(/[^\d]/g, '')}@s.whatsapp.net`;
+    }
+
+    const settings = await prisma.setting.findUnique({ where: { userId } });
+    const rawPollTitle = settings?.onboardingPollTitle || 'Please select the primary area or category of your body experiencing pain:';
+    const translatedTitle = await this.translateText(userId, rawPollTitle, language);
+
+    let options = PAIN_CATEGORIES.map((c) => c.name);
+    if (settings?.onboardingPollOptions) {
+      try {
+        const parsed = JSON.parse(settings.onboardingPollOptions);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          options = parsed;
+        }
+      } catch {}
+    }
+
+    let pollSent = false;
+    try {
+      console.log(`[WhatsApp Baileys] Sending Pain Category Poll to ${jid}...`);
+      await sock.sendMessage(jid, {
+        poll: {
+          name: translatedTitle,
+          values: options,
+          selectableCount: 1,
+        },
+      });
+      pollSent = true;
+    } catch (pollErr) {
+      console.error('[WhatsApp Baileys] Native poll error, sending fallback menu text:', pollErr);
+    }
+
+    let textFallback = `📊 *${translatedTitle}*\n\n`;
+    options.forEach((opt, idx) => {
+      textFallback += `${idx + 1}. ${opt}\n`;
+    });
+
+    if (!pollSent) {
+      await sock.sendMessage(jid, { text: textFallback });
+    }
+
+    if (conversationId) {
+      const dbText = `[Poll] ${translatedTitle}\n\n${options.map((o, i) => `${i + 1}. ${o}`).join('\n')}`;
+      await prisma.message.create({
+        data: {
+          conversationId,
+          sender: 'AI',
+          body: dbText,
+          type: 'text',
+          timestamp: new Date(),
+        },
+      }).catch((e) => console.error('[WhatsApp Service] Error creating poll message log:', e));
+    }
+  }
+
+  /**
+   * Sends a PDF or document file to WhatsApp.
+   */
+  public static async sendDocumentMessage(
+    userId: string,
+    targetPhone: string,
+    fileUrlOrPath: string,
+    fileName?: string,
+    caption?: string,
+    conversationId?: string
+  ): Promise<boolean> {
+    const sock = this.clients.get(userId);
+    if (!sock) {
+      console.log(`[WhatsApp Service] Cannot send document message: User ${userId} is not connected.`);
+      return false;
+    }
+
+    let jid = targetPhone;
+    if (targetPhone.endsWith('@c.us')) {
+      jid = targetPhone.replace('@c.us', '@s.whatsapp.net');
+    } else if (!targetPhone.includes('@')) {
+      jid = `${targetPhone.replace(/[^\d]/g, '')}@s.whatsapp.net`;
+    }
+
+    try {
+      let docSource: any = null;
+      if (fileUrlOrPath.startsWith('http://') || fileUrlOrPath.startsWith('https://')) {
+        docSource = { url: fileUrlOrPath };
+      } else if (fileUrlOrPath.startsWith('/uploads/') || fileUrlOrPath.startsWith('uploads/')) {
+        const cleanPath = fileUrlOrPath.replace(/^\/uploads\//, 'uploads/').replace(/^uploads\//, 'uploads/');
+        const absolutePath = path.join(process.cwd(), 'storage', cleanPath);
+        if (fs.existsSync(absolutePath)) {
+          docSource = fs.readFileSync(absolutePath);
+        } else {
+          docSource = { url: `${process.env.BACKEND_URL || 'http://localhost:5000'}${fileUrlOrPath}` };
+        }
+      } else {
+        const localPath = path.isAbsolute(fileUrlOrPath) ? fileUrlOrPath : path.join(process.cwd(), fileUrlOrPath);
+        if (fs.existsSync(localPath)) {
+          docSource = fs.readFileSync(localPath);
+        } else {
+          docSource = { url: fileUrlOrPath };
+        }
+      }
+
+      const docName = fileName || 'Clinical_Intake_Assessment_Form.pdf';
+
+      await sock.sendMessage(jid, {
+        document: docSource,
+        mimetype: 'application/pdf',
+        fileName: docName,
+        caption: caption || `📄 Clinical Assessment Form`,
+      });
+
+      console.log(`[WhatsApp Service] Successfully sent PDF document "${docName}" to ${jid}`);
+
+      if (conversationId) {
+        await prisma.message.create({
+          data: {
+            conversationId,
+            sender: 'AI',
+            body: `📄 Attachment: ${docName}`,
+            type: 'document',
+            timestamp: new Date(),
+          },
+        }).catch((e) => console.error('[WhatsApp Service] Error logging document message:', e));
+      }
+
+      return true;
+    } catch (err: any) {
+      console.error(`[WhatsApp Service] Failed to send document message to ${targetPhone}:`, err.message || err);
+      return false;
     }
   }
 
@@ -918,8 +1152,8 @@ TEXT TO PARSE:
 
     const N = onboardingQuestions.length;
 
-    if (N > 0 && (patient.onboardingStep <= N + 2 || patient.onboardingStep === 101)) {
-      console.log(`[Onboarding Pipeline] ACTIVE: Patient ${patient.name} (${patientPhone}) is in intake flow. Step: ${patient.onboardingStep} of ${N + 2}`);
+    if (N > 0 && (patient.onboardingStep <= N + 3 || patient.onboardingStep === 101 || patient.onboardingStep === 201)) {
+      console.log(`[Onboarding Pipeline] ACTIVE: Patient ${patient.name} (${patientPhone}) is in intake flow. Step: ${patient.onboardingStep} of ${N + 3}`);
 
       try {
         let answers: Record<string, string> = {};
@@ -937,16 +1171,18 @@ TEXT TO PARSE:
           const clinicAddress = settings?.clinicAddress || "";
           const clinicWebsite = settings?.website || "";
 
-          let greeting = `👋 Hello! Welcome to *${clinicName}*!\n\n`;
-          greeting += `🤖 *AI Assistant Disclaimer*:\n`;
-          greeting += `I am DR. ASAD AI, your automated clinical assistant. I am here to help you get registered and guide you through your rehabilitation intake. Please note that while I can answer clinic questions and gather details, I do not provide medical diagnosis or replace human practitioners.\n\n`;
-          
-          if (clinicAddress || clinicPhone || clinicWebsite) {
-            greeting += `📍 *Clinic Details*:\n`;
-            if (clinicAddress) greeting += `• Address: ${clinicAddress}\n`;
-            if (clinicPhone) greeting += `• Phone: ${clinicPhone}\n`;
-            if (clinicWebsite) greeting += `• Website: ${clinicWebsite}\n`;
-            greeting += `\n`;
+          let greeting = '';
+          if (settings?.welcomeMessage && settings.welcomeMessage.trim().length > 0) {
+            greeting = `${settings.welcomeMessage.trim()}\n\n`;
+          } else {
+            greeting = `👋 Hello! Welcome to *${clinicName}*!\n\n🤖 *AI Assistant Disclaimer*:\nI am DR. ASAD AI, your automated clinical assistant. I am here to help you get registered and guide you through your rehabilitation intake. Please note that while I can answer clinic questions and gather details, I do not provide medical diagnosis or replace human practitioners.\n\n`;
+            if (clinicAddress || clinicPhone || clinicWebsite) {
+              greeting += `📍 *Clinic Details*:\n`;
+              if (clinicAddress) greeting += `• Address: ${clinicAddress}\n`;
+              if (clinicPhone) greeting += `• Phone: ${clinicPhone}\n`;
+              if (clinicWebsite) greeting += `• Website: ${clinicWebsite}\n`;
+              greeting += `\n`;
+            }
           }
 
           const languageMenu = `Please select your preferred language by typing the number:
@@ -1272,6 +1508,30 @@ TEXT TO PARSE:
           }
 
           answers[String(qIndex + 1)] = incomingText || '[Media/Attachment]';
+
+          const configuredPollStep = (settings as any)?.onboardingPollStep ?? -1;
+          const isMidIntakePollTriggered = configuredPollStep > 0 && configuredPollStep === (qIndex + 1) && !answers['painCategory'];
+
+          if (isMidIntakePollTriggered) {
+            console.log(`[Onboarding Pipeline] Mid-intake poll trigger after Question ${configuredPollStep} for ${patient.name}`);
+            answers['resumeAfterPollStep'] = String(currentStep + 1);
+
+            await prisma.patient.update({
+              where: { id: patient.id },
+              data: {
+                onboardingStep: N + 3,
+                onboardingAnswers: JSON.stringify(answers),
+              },
+            });
+
+            try {
+              await this.sendPainCategoryPoll(userId, remoteJid, patientLanguage, conversation.id);
+            } catch (pollErr) {
+              console.error('[WhatsApp Service] Error sending mid-intake poll:', pollErr);
+            }
+            return;
+          }
+
           const nextQuestion = cachedTranslatedQuestions[currentStep - 1] || onboardingQuestions[currentStep - 1];
 
           await this.sendMessage(userId, remoteJid, nextQuestion);
@@ -1535,6 +1795,21 @@ TEXT TO PARSE:
             console.error('[WhatsApp Service] Error auto-creating TreatmentPlan:', planErr);
           }
 
+          // Send Pain Category Poll if not already answered mid-intake
+          if (!answers['painCategory']) {
+            try {
+              await this.sendPainCategoryPoll(userId, remoteJid, patientLanguage, conversation.id);
+            } catch (pollErr) {
+              console.error('[WhatsApp Service] Error sending pain category poll after intake completion:', pollErr);
+            }
+          } else {
+            // Already answered mid-intake -> advance step to complete (N + 4)
+            await prisma.patient.update({
+              where: { id: patient.id },
+              data: { onboardingStep: N + 4 },
+            });
+          }
+
           SocketService.sendToUser(userId, 'new_message', {
             conversationId: conversation.id,
             message: savedMsg,
@@ -1543,6 +1818,439 @@ TEXT TO PARSE:
           SocketService.sendToUser(userId, 'patient_update', { patientId: patient.id });
           return;
         }
+
+        // --- STEP N + 3: Process Pain Category Poll Vote / Selection ---
+        if (patient.onboardingStep === N + 3) {
+          console.log(`[Onboarding Pipeline] Step N+3: Processing Pain Category Poll response for ${patient.name}`);
+          let selectedCategory = '';
+
+          let activeCategories: string[] = PAIN_CATEGORIES.map((c) => c.name);
+          if (settings?.onboardingPollOptions) {
+            try {
+              const parsed = JSON.parse(settings.onboardingPollOptions);
+              if (Array.isArray(parsed) && parsed.length > 0) activeCategories = parsed;
+            } catch {}
+          }
+
+          // A. Check for Baileys native poll update/vote message
+          const pollVote = msg.message?.pollUpdateMessage || msg.message?.pollCreationMessage || (msg.message as any)?.vote;
+          if (pollVote) {
+            console.log('[Onboarding Poll Debug] pollVote payload:', JSON.stringify(pollVote, null, 2));
+            const voteObj = (pollVote as any)?.vote || pollVote;
+            const selectedOptions = voteObj?.selectedOptions || (pollVote as any)?.selectedOptions || [];
+            console.log('[Onboarding Poll Debug] selectedOptions count:', selectedOptions.length);
+
+            if (Array.isArray(selectedOptions) && selectedOptions.length > 0) {
+              for (const optHashBuf of selectedOptions) {
+                let optHashStr = '';
+                if (Buffer.isBuffer(optHashBuf) || optHashBuf instanceof Uint8Array) {
+                  optHashStr = Buffer.from(optHashBuf).toString('hex');
+                } else if (typeof optHashBuf === 'string') {
+                  optHashStr = optHashBuf;
+                } else if (typeof optHashBuf === 'number') {
+                  if (optHashBuf >= 0 && optHashBuf < activeCategories.length) {
+                    selectedCategory = activeCategories[optHashBuf];
+                    break;
+                  }
+                }
+
+                console.log('[Onboarding Poll Debug] Incoming option hash string:', optHashStr);
+
+                if (!selectedCategory && optHashStr) {
+                  for (let i = 0; i < activeCategories.length; i++) {
+                    const catName = activeCategories[i];
+                    const hashHex1 = crypto.createHash('sha256').update(catName).digest('hex');
+                    const hashHex2 = crypto.createHash('sha256').update(catName.trim()).digest('hex');
+                    const hashHex3 = crypto.createHash('sha256').update(Buffer.from(catName, 'utf-8')).digest('hex');
+                    const hashHex4 = crypto.createHash('sha256').update(Buffer.from(catName.trim(), 'utf-8')).digest('hex');
+
+                    if (
+                      optHashStr === hashHex1 ||
+                      optHashStr === hashHex2 ||
+                      optHashStr === hashHex3 ||
+                      optHashStr === hashHex4 ||
+                      optHashStr === String(i) ||
+                      optHashStr === String(i + 1)
+                    ) {
+                      selectedCategory = catName;
+                      console.log(`[Onboarding Poll Debug] MATCHED option index ${i}: ${catName}`);
+                      break;
+                    }
+                  }
+                }
+                if (selectedCategory) break;
+              }
+            }
+          }
+
+          // B. Matching from incomingText
+          if (!selectedCategory && incomingText) {
+            const cleanInput = incomingText.trim().toLowerCase();
+
+            // 1. Check numeric selection e.g. "1", "2", "3"
+            const numIndex = parseInt(cleanInput, 10);
+            if (!isNaN(numIndex) && numIndex >= 1 && numIndex <= activeCategories.length) {
+              selectedCategory = activeCategories[numIndex - 1];
+            }
+
+            // 2. Check text match against activeCategories
+            if (!selectedCategory) {
+              for (const catName of activeCategories) {
+                const cleanCat = catName.toLowerCase().replace(/[^a-z0-9\s]/g, '');
+                const cleanIn = cleanInput.replace(/[^a-z0-9\s]/g, '');
+                if (cleanIn.length >= 2 && (cleanCat.includes(cleanIn) || cleanIn.includes(cleanCat))) {
+                  selectedCategory = catName;
+                  break;
+                }
+                const words = cleanCat.split(/\s+/).filter((w) => w.length > 2);
+                if (words.some((w) => cleanIn.includes(w))) {
+                  selectedCategory = catName;
+                  break;
+                }
+              }
+            }
+          }
+
+          // C. Fallback: If pollVote was received but hash matching was inconclusive, default to the category with an attached PDF form or first option!
+          if (!selectedCategory && pollVote) {
+            let pdfMapping: Record<string, any> = {};
+            try {
+              pdfMapping = JSON.parse((settings as any)?.onboardingPollPdfs || '{}');
+            } catch {}
+
+            const pdfCategories = Object.keys(pdfMapping);
+            if (pdfCategories.length > 0) {
+              selectedCategory = pdfCategories[0];
+              console.log(`[Onboarding Poll Debug] Poll vote fallback to attached PDF category: ${selectedCategory}`);
+            } else if (activeCategories.length > 0) {
+              selectedCategory = activeCategories[0];
+              console.log(`[Onboarding Poll Debug] Poll vote fallback to first category option: ${selectedCategory}`);
+            }
+          }
+
+          if (selectedCategory) {
+            console.log(`[Onboarding Pipeline] Patient ${patient.name} selected pain category: ${selectedCategory}`);
+
+            answers['painCategory'] = selectedCategory;
+
+            const existingNotes = patient.notes ? `${patient.notes}\n` : '';
+            const updatedNotes = `${existingNotes}Primary Pain Category: ${selectedCategory}\n`;
+
+            const resumeStepStr = answers['resumeAfterPollStep'];
+            let nextOnboardingStep = N + 4;
+            if (resumeStepStr) {
+              nextOnboardingStep = parseInt(resumeStepStr, 10);
+            }
+
+            // Check if there is an attached PDF form for selected category
+            let pdfMapping: Record<string, any> = {};
+            try {
+              pdfMapping = JSON.parse((settings as any)?.onboardingPollPdfs || '{}');
+            } catch {}
+
+            let categoryPdfInfo = pdfMapping[selectedCategory];
+
+            // Robust fallback matching (case-insensitive / loose key matching)
+            if (!categoryPdfInfo && Object.keys(pdfMapping).length > 0) {
+              const normSel = selectedCategory.toLowerCase().replace(/[^a-z0-9]/g, '');
+              for (const [k, v] of Object.entries(pdfMapping)) {
+                const normK = k.toLowerCase().replace(/[^a-z0-9]/g, '');
+                if (normK && (normK === normSel || normK.includes(normSel) || normSel.includes(normK))) {
+                  categoryPdfInfo = v;
+                  break;
+                }
+              }
+            }
+
+            const categoryPdfUrl = typeof categoryPdfInfo === 'string' ? categoryPdfInfo : categoryPdfInfo?.url;
+
+            let extractedPdfQuestions: string[] = [];
+            if (categoryPdfUrl) {
+              extractedPdfQuestions = await WhatsappService.extractPdfQuestions(categoryPdfUrl);
+            }
+
+            // Also update Treatment Plan condition & notes if existing
+            try {
+              const treatmentPlan = await prisma.treatmentPlan.findFirst({
+                where: { userId, patientId: patient.id },
+              });
+              if (treatmentPlan) {
+                await prisma.treatmentPlan.update({
+                  where: { id: treatmentPlan.id },
+                  data: {
+                    condition: selectedCategory,
+                    notes: `${treatmentPlan.notes || ''}\nPrimary Pain Category: ${selectedCategory}`,
+                  },
+                });
+              }
+            } catch (tpErr) {
+              console.error('[WhatsApp Service] Error updating treatment plan condition:', tpErr);
+            }
+
+            // Send PDF document message
+            if (categoryPdfUrl) {
+              try {
+                const cleanFileName = typeof categoryPdfInfo === 'object' && categoryPdfInfo?.fileName
+                  ? categoryPdfInfo.fileName
+                  : `${selectedCategory.replace(/[^a-zA-Z0-9]/g, '_')}_Assessment_Form.pdf`;
+
+                await WhatsappService.sendDocumentMessage(
+                  userId,
+                  remoteJid,
+                  categoryPdfUrl,
+                  cleanFileName,
+                  `📄 Attached Clinical Assessment Form for *${selectedCategory}*`,
+                  conversation.id
+                );
+              } catch (pdfErr) {
+                console.error('[WhatsApp Service] Error sending category PDF document message:', pdfErr);
+              }
+            }
+
+            // If PDF text questions extracted, trigger 1-by-1 PDF question flow!
+            if (extractedPdfQuestions.length > 0) {
+              console.log(`[Onboarding Pipeline] Extracted ${extractedPdfQuestions.length} PDF questions for ${selectedCategory}`);
+              answers['pdfQuestions'] = JSON.stringify(extractedPdfQuestions);
+              answers['pdfQIndex'] = '0';
+              answers['pdfCategory'] = selectedCategory;
+
+              await prisma.patient.update({
+                where: { id: patient.id },
+                data: {
+                  condition: selectedCategory,
+                  onboardingStep: 201, // 1-by-1 PDF assessment questions step
+                  onboardingAnswers: JSON.stringify(answers),
+                  notes: updatedNotes,
+                  lastMessage: selectedCategory,
+                },
+              });
+
+              // Send category confirmation message
+              const confirmMsg = `Thank you! We have updated your profile with your pain category: *${selectedCategory}*. 🩺\n\nPlease answer these assessment questions extracted from your *${selectedCategory}* form:`;
+              const translatedConfirm = await this.translateText(userId, confirmMsg, patientLanguage);
+              await this.sendMessage(userId, remoteJid, translatedConfirm);
+
+              // Send 1st PDF question (1/N)
+              const firstPdfQ = `📄 *Category Assessment (Question 1 of ${extractedPdfQuestions.length})*:\n\n${extractedPdfQuestions[0]}`;
+              await this.sendMessage(userId, remoteJid, firstPdfQ);
+
+              const savedQMsg = await prisma.message.create({
+                data: {
+                  conversationId: conversation.id,
+                  sender: 'AI',
+                  body: `${translatedConfirm}\n\n${firstPdfQ}`,
+                  type: 'text',
+                  timestamp: new Date(),
+                },
+              });
+
+              SocketService.sendToUser(userId, 'new_message', {
+                conversationId: conversation.id,
+                message: savedQMsg,
+              });
+
+              SocketService.sendToUser(userId, 'patient_update', { patientId: patient.id });
+              return;
+            }
+
+            // If no PDF questions, save step & send category confirmation directly
+            if (resumeStepStr) delete answers['resumeAfterPollStep'];
+
+            await prisma.patient.update({
+              where: { id: patient.id },
+              data: {
+                condition: selectedCategory,
+                onboardingStep: nextOnboardingStep,
+                onboardingAnswers: JSON.stringify(answers),
+                notes: updatedNotes,
+                lastMessage: selectedCategory,
+              },
+            });
+
+            const confirmMsg = `Thank you! We have updated your profile with your pain category: *${selectedCategory}*. 🩺\n\nOur clinical team has logged this and will customize your physical therapy plan accordingly.`;
+            const translatedConfirm = await this.translateText(userId, confirmMsg, patientLanguage);
+
+            await this.sendMessage(userId, remoteJid, translatedConfirm);
+
+            const savedConfirm = await prisma.message.create({
+              data: {
+                conversationId: conversation.id,
+                sender: 'AI',
+                body: translatedConfirm,
+                type: 'text',
+                timestamp: new Date(),
+              },
+            });
+
+            SocketService.sendToUser(userId, 'new_message', {
+              conversationId: conversation.id,
+              message: savedConfirm,
+            });
+
+            // If mid-intake poll was answered, resume next onboarding question immediately
+            if (resumeStepStr && nextOnboardingStep <= N + 1) {
+              const nextQIndex = nextOnboardingStep - 2;
+              let cachedTranslatedQuestions: string[] = onboardingQuestions;
+              try {
+                const cached = JSON.parse(answers['_translatedQuestions'] || 'null');
+                if (Array.isArray(cached) && cached.length === N) cachedTranslatedQuestions = cached;
+              } catch {}
+
+              const nextQ = cachedTranslatedQuestions[nextQIndex] || onboardingQuestions[nextQIndex];
+              if (nextQ) {
+                await this.sendMessage(userId, remoteJid, nextQ);
+                const savedNextQ = await prisma.message.create({
+                  data: {
+                    conversationId: conversation.id,
+                    sender: 'AI',
+                    body: nextQ,
+                    type: 'text',
+                    timestamp: new Date(),
+                  },
+                });
+                SocketService.sendToUser(userId, 'new_message', {
+                  conversationId: conversation.id,
+                  message: savedNextQ,
+                });
+              }
+            }
+
+            SocketService.sendToUser(userId, 'patient_update', { patientId: patient.id });
+            return;
+          }
+        }
+
+        // --- STEP 201: Process 1-by-1 PDF Assessment Questions ---
+        if (patient.onboardingStep === 201) {
+          console.log(`[Onboarding Pipeline] Step 201: Processing PDF question answer from ${patient.name}`);
+
+          let pdfQuestions: string[] = [];
+          let pdfQIndex = 0;
+          try {
+            pdfQuestions = JSON.parse(answers['pdfQuestions'] || '[]');
+            pdfQIndex = Number(answers['pdfQIndex'] || 0);
+          } catch {}
+
+          const currentPdfQ = pdfQuestions[pdfQIndex] || `PDF Question ${pdfQIndex + 1}`;
+          answers[`pdf_ans_${pdfQIndex + 1}`] = incomingText;
+
+          // Check if there are more PDF questions left
+          if (pdfQIndex + 1 < pdfQuestions.length) {
+            const nextIdx = pdfQIndex + 1;
+            answers['pdfQIndex'] = String(nextIdx);
+
+            await prisma.patient.update({
+              where: { id: patient.id },
+              data: {
+                onboardingAnswers: JSON.stringify(answers),
+                lastMessage: incomingText,
+              },
+            });
+
+            const nextPdfQ = `📄 *Category Assessment (Question ${nextIdx + 1} of ${pdfQuestions.length})*:\n\n${pdfQuestions[nextIdx]}`;
+            await this.sendMessage(userId, remoteJid, nextPdfQ);
+
+            const savedMsg = await prisma.message.create({
+              data: {
+                conversationId: conversation.id,
+                sender: 'AI',
+                body: nextPdfQ,
+                type: 'text',
+                timestamp: new Date(),
+              },
+            });
+
+            SocketService.sendToUser(userId, 'new_message', {
+              conversationId: conversation.id,
+              message: savedMsg,
+            });
+            return;
+          } else {
+            // Completed all PDF questions!
+            const categoryName = answers['pdfCategory'] || patient.condition || 'Category Assessment';
+            
+            // Build filled PDF Form Assessment summary text
+            let pdfFormNotes = `\n=== FILLED PDF CLINICAL ASSESSMENT FORM: ${categoryName} ===\nCompleted: ${new Date().toLocaleString()}\n`;
+            pdfQuestions.forEach((q, idx) => {
+              const aVal = answers[`pdf_ans_${idx + 1}`] || 'Recorded';
+              pdfFormNotes += `Form Q${idx + 1}: ${q}\nAnswer: ${aVal}\n\n`;
+            });
+
+            const existingNotes = patient.notes ? `${patient.notes}\n` : '';
+            const updatedNotes = `${existingNotes}${pdfFormNotes}`;
+
+            // Preserve cached pdfQuestions array in onboardingAnswers so frontend Outcome Report can render the filled form!
+            answers['pdfQuestions'] = JSON.stringify(pdfQuestions);
+            delete answers['pdfQIndex'];
+
+            const resumeStepStr = answers['resumeAfterPollStep'];
+            let nextOnboardingStep = N + 4;
+            if (resumeStepStr) {
+              nextOnboardingStep = parseInt(resumeStepStr, 10);
+              delete answers['resumeAfterPollStep'];
+            }
+
+            await prisma.patient.update({
+              where: { id: patient.id },
+              data: {
+                onboardingStep: nextOnboardingStep,
+                onboardingAnswers: JSON.stringify(answers),
+                notes: updatedNotes,
+                lastMessage: incomingText,
+              },
+            });
+
+            const pdfDoneMsg = `Thank you for completing the ${categoryName} assessment form questions! 📋 All your responses have been filled into your clinical outcome report!`;
+            const translatedDone = await this.translateText(userId, pdfDoneMsg, patientLanguage);
+            await this.sendMessage(userId, remoteJid, translatedDone);
+
+            const savedDoneMsg = await prisma.message.create({
+              data: {
+                conversationId: conversation.id,
+                sender: 'AI',
+                body: translatedDone,
+                type: 'text',
+                timestamp: new Date(),
+              },
+            });
+
+            SocketService.sendToUser(userId, 'new_message', {
+              conversationId: conversation.id,
+              message: savedDoneMsg,
+            });
+
+            // Resume next question if mid-intake
+            if (resumeStepStr && nextOnboardingStep <= N + 1) {
+              const nextQIndex = nextOnboardingStep - 2;
+              let cachedTranslatedQuestions: string[] = onboardingQuestions;
+              try {
+                const cached = JSON.parse(answers['_translatedQuestions'] || 'null');
+                if (Array.isArray(cached) && cached.length === N) cachedTranslatedQuestions = cached;
+              } catch {}
+
+              const nextQ = cachedTranslatedQuestions[nextQIndex] || onboardingQuestions[nextQIndex];
+              if (nextQ) {
+                await this.sendMessage(userId, remoteJid, nextQ);
+                const savedNextQ = await prisma.message.create({
+                  data: {
+                    conversationId: conversation.id,
+                    sender: 'AI',
+                    body: nextQ,
+                    type: 'text',
+                    timestamp: new Date(),
+                  },
+                });
+                SocketService.sendToUser(userId, 'new_message', {
+                  conversationId: conversation.id,
+                  message: savedNextQ,
+                });
+              }
+            }
+
+            SocketService.sendToUser(userId, 'patient_update', { patientId: patient.id });
+            return;
+          }
+        }
       } catch (onbErr) {
         console.error('[Onboarding Pipeline Error] Failed to run onboarding step:', onbErr);
       }
@@ -1550,7 +2258,7 @@ TEXT TO PARSE:
 
     // 5. AI Auto-Reply Pipeline
     // Ensure we do NOT trigger AI outgoing messages while onboarding is in progress
-    const isOnboardingActive = N > 0 && (patient.onboardingStep <= N + 2 || patient.onboardingStep === 101);
+    const isOnboardingActive = N > 0 && (patient.onboardingStep <= N + 3 || patient.onboardingStep === 101 || patient.onboardingStep === 201);
     const isAiActive = !isOnboardingActive && conversation.isAiEnabled && settings?.autoReplyEnabled;
 
     if (isAiActive) {
